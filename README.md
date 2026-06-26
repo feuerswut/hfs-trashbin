@@ -2,6 +2,13 @@
 
 A plugin for [HFS](https://github.com/rejetto/hfs) that intercepts file deletions and moves them to a trash folder instead of permanently removing them.
 
+## Alpha notice
+- This plugin is in ALPHA. I cannot guarantee it to work by default, it still needs testing. Please report back to me in the issue.
+- Naturally, keep this off of critical infrastructure, DO NOT RELY ON THIS YET, it may change a lot.
+
+- GENERAL WARNING: DELETING THIS PLUGIN WILL ERASE ALL DELETED FILES PERMANENTLY. This is, right now, intended.
+- There is a folder called storage/trash in the plugins folder containing ALL DELETED FILES AND FOLDERS.
+
 ## Features
 
 - Intercepts HFS delete operations — files are moved to trash, not destroyed
@@ -13,6 +20,7 @@ A plugin for [HFS](https://github.com/rejetto/hfs) that intercepts file deletion
 ## Installation
 
 Copy the `dist/` folder into your HFS plugins directory and rename it to `trashbin`.
+Or, easier: Go to the install plugins panel and simply search for `trashbin`, by Feuerswut (me) and click install.
 
 HFS will pick it up automatically. No restart needed.
 
