@@ -19,6 +19,16 @@ dbg('cwd               :', process.cwd());
 const tarball = path.join(__dirname, 'sqljs.tar.gz');
 const outDir  = path.join(__dirname, 'sqljs');
 
+// Refuse to install sql.js if the plugin was already migrated to node:sqlite
+const storageDir = process.env.STORAGE_DIR;
+if (storageDir && fs.existsSync(path.join(storageDir, 'upgrade'))) {
+    console.error('[install] ERROR: Downgrade detected.');
+    console.error('[install]        This plugin was already migrated to node:sqlite (HFS built-in).');
+    console.error('[install]        Downgrading to an older Node / HFS version is not supported.');
+    console.error('[install]        To force a reinstall, remove the "upgrade" file from the storage directory.');
+    process.exit(1);
+}
+
 dbg('tarball path      :', tarball);
 dbg('output dir        :', outDir);
 

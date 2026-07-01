@@ -1,16 +1,28 @@
-exports.version = 0.1;
+exports.version = 0.2;
 exports.description = "Trash Bin — moves deleted files to trash instead of permanently deleting them";
-exports.apiRequired = 8.891;
+exports.apiRequired = 10.3; // api.getCurrentUsername()
 exports.author = "feuerswut";
 exports.repo = "feuerswut/hfs-trashbin";
+
+// 0 = silent | 1 = install/upgrade + basic status | 2 = all (verbose sql.js internals + operations)
+const DEBUG = 1;
 
 exports.init = async api => {
     const fs             = require('fs');
     const path           = require('path');
     const { spawnSync }  = require('child_process');
 
+    const log1 = (...a) => { if (DEBUG >= 1) api.log('[trashbin]', ...a); };
+    const log2 = (...a) => { if (DEBUG >= 2) api.log('[trashbin]', ...a); };
+
     const trashDir = path.join(api.storageDir, 'trash');
     fs.mkdirSync(trashDir, { recursive: true });
+
+    // Run one-time migration (sql.js -> node:sqlite) — upgrade.js always debugs internally
+    const sentinelPath = path.join(api.storageDir, 'upgrade');
+    if (!fs.existsSync(sentinelPath)) {
+        await require('./upgrade')(api.storageDir, __dirname, log1);
+    }
 
     const CREATE = `
         CREATE TABLE IF NOT EXISTS trash (
@@ -40,9 +52,11 @@ exports.init = async api => {
         dbGet    = id           => selO.get(id);
         dbDelete = id           => del.run(id);
         dbClose  = ()           => ndb.close();
-        api.log('[trashbin] using node:sqlite');
+        log1('using node:sqlite');
     } catch (e) {
-        const log = (...a) => api.log('[trashbin:sqljs]', ...a);
+        const log  = (...a) => { if (DEBUG >= 1) api.log('[trashbin:sqljs]', ...a); };
+        const logv = (...a) => { if (DEBUG >= 2) api.log('[trashbin:sqljs]', ...a); };
+
         log('WARNING: node:sqlite unavailable, reason:', e.message);
         log('         node version:', process.version, '| platform:', process.platform, '| arch:', process.arch);
         log('         node:sqlite requires Node >= 22.5.0');
@@ -53,9 +67,9 @@ exports.init = async api => {
         const sqljsWasm  = path.join(sqljsDir, 'sql-wasm.wasm');
         const installJs  = path.join(__dirname, 'install.js');
 
-        log('sql.js dir  :', sqljsDir);
-        log('sql-wasm.js :', sqljsEntry, '| exists:', fs.existsSync(sqljsEntry));
-        log('sql-wasm.wasm:', sqljsWasm, '| exists:', fs.existsSync(sqljsWasm));
+        logv('sql.js dir  :', sqljsDir);
+        logv('sql-wasm.js :', sqljsEntry, '| exists:', fs.existsSync(sqljsEntry));
+        logv('sql-wasm.wasm:', sqljsWasm, '| exists:', fs.existsSync(sqljsWasm));
 
         if (!fs.existsSync(sqljsEntry) || !fs.existsSync(sqljsWasm)) {
             log('sql.js not installed — running install.js automatically');
@@ -66,8 +80,9 @@ exports.init = async api => {
                 return { unload: () => {} };
             }
 
+            // install.js always runs with DEBUG=1 (it always debugs internally)
             const result = spawnSync(process.execPath, [installJs], {
-                env: { ...process.env, DEBUG: '1' },
+                env: { ...process.env, DEBUG: '1', STORAGE_DIR: api.storageDir },
                 encoding: 'utf8',
             });
             log('install.js stdout:\n' + (result.stdout || '(empty)'));
@@ -81,53 +96,53 @@ exports.init = async api => {
             log('install.js succeeded');
         }
 
-        log('requiring sql-wasm.js from', sqljsEntry);
+        logv('requiring sql-wasm.js from', sqljsEntry);
         let initSqlJs;
         try {
             initSqlJs = require(sqljsEntry);
-            log('require succeeded, typeof initSqlJs:', typeof initSqlJs);
+            logv('require succeeded, typeof initSqlJs:', typeof initSqlJs);
         } catch (re) {
             log('ERROR: require(sql-wasm.js) threw:', re.message, '\n', re.stack);
             return { unload: () => {} };
         }
 
-        log('calling initSqlJs({ locateFile })');
+        logv('calling initSqlJs({ locateFile })');
         let SQL;
         try {
             SQL = await initSqlJs({
                 locateFile: f => {
                     const p = path.join(sqljsDir, f);
-                    log('locateFile:', f, '->', p, '| exists:', fs.existsSync(p));
+                    logv('locateFile:', f, '->', p, '| exists:', fs.existsSync(p));
                     return p;
                 },
             });
-            log('initSqlJs resolved, typeof SQL.Database:', typeof SQL.Database);
+            logv('initSqlJs resolved, typeof SQL.Database:', typeof SQL.Database);
         } catch (ie) {
             log('ERROR: initSqlJs() rejected:', ie.message, '\n', ie.stack);
             return { unload: () => {} };
         }
 
         const dbPath = path.join(api.storageDir, 'trash.sqljs.db');
-        log('db file:', dbPath, '| exists:', fs.existsSync(dbPath));
+        logv('db file:', dbPath, '| exists:', fs.existsSync(dbPath));
 
         let sdb;
         try {
             sdb = fs.existsSync(dbPath)
                 ? new SQL.Database(fs.readFileSync(dbPath))
                 : new SQL.Database();
-            log('Database instance created');
+            logv('Database instance created');
         } catch (de) {
             log('ERROR: new SQL.Database() threw:', de.message, '\n', de.stack);
             return { unload: () => {} };
         }
 
-        try { sdb.run(CREATE); log('CREATE TABLE IF NOT EXISTS succeeded'); }
+        try { sdb.run(CREATE); logv('CREATE TABLE IF NOT EXISTS succeeded'); }
         catch (ce) { log('ERROR: CREATE TABLE failed:', ce.message); return { unload: () => {} }; }
 
         const save = () => {
             const buf = sdb.export();
             fs.writeFileSync(dbPath, buf);
-            log('db saved,', buf.length, 'bytes');
+            logv('db saved,', buf.length, 'bytes');
         };
 
         const sqlQuery = (sql, params = []) => {
@@ -143,8 +158,8 @@ exports.init = async api => {
         dbAll    = ()           => sqlQuery(SELECT_ALL);
         dbGet    = id           => sqlQuery(SELECT_ONE, [id])[0];
         dbDelete = id           => { sdb.run(DELETE_ONE, [id]); save(); };
-        dbClose  = ()           => { log('closing sql.js db'); sdb.close(); };
-        api.log('[trashbin] using sql.js');
+        dbClose  = ()           => { logv('closing sql.js db'); sdb.close(); };
+        log1('using sql.js');
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────
@@ -183,13 +198,13 @@ exports.init = async api => {
         const dest = path.join(trashDir, `${Date.now()}_${name}`);
 
         try { moveItem(source, dest); }
-        catch (e) { api.log('[trashbin] move failed:', e.message); return; }
+        catch (e) { log1('move failed:', e.message); return; }
 
         const user = api.getCurrentUsername(ctx) || 'anonymous';
         dbRun(b64enc(user), b64enc(source), b64enc(dest), Math.floor(Date.now() / 1000));
 
-        api.log('[trashbin] db dump:', JSON.stringify(dbAll(), null, 2));
-        api.log('[trashbin] trashed by', user + ':', source, '->', dest);
+        log2('db dump:', JSON.stringify(dbAll(), null, 2));
+        log1('trashed by', user + ':', source, '->', dest);
 
         ctx.respond = false;
         ctx.res.statusCode = 200;
@@ -225,7 +240,7 @@ exports.init = async api => {
             try {
                 moveItem(src, dst);
                 dbDelete(id);
-                api.log('[trashbin] restored by', user + ':', src, '->', dst);
+                log1('restored by', user + ':', src, '->', dst);
                 return { ok: true };
             } catch (e) { return { error: e.message }; }
         },
@@ -237,13 +252,13 @@ exports.init = async api => {
             try {
                 fs.rmSync(b64dec(row.dest), { recursive: true, force: true });
                 dbDelete(id);
-                api.log('[trashbin] permanently deleted by', user + ':', b64dec(row.dest));
+                log1('permanently deleted by', user + ':', b64dec(row.dest));
                 return { ok: true };
             } catch (e) { return { error: e.message }; }
         },
     };
 
-    api.log('[trashbin] initialized — trash dir:', trashDir);
+    log1('initialized — trash dir:', trashDir);
     return {
         frontend_js: 'main.js',
         customRest,
