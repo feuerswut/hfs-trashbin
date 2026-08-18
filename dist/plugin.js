@@ -1,19 +1,44 @@
-exports.version = 0.2;
+exports.version = 0.3;
 exports.description = "Trash Bin — moves deleted files to trash instead of permanently deleting them";
-exports.apiRequired = 10.3; // api.getCurrentUsername()
+exports.apiRequired = 13;
 exports.author = "feuerswut";
 exports.repo = "feuerswut/hfs-trashbin";
+exports.depend = [{ repo: "feuerswut/hfs-shared" }];
 
-// 0 = silent | 1 = install/upgrade + basic status | 2 = all (verbose sql.js internals + operations)
-const DEBUG = 1;
+exports.config = {
+    trashbin_enableLogging: {
+        type: 'boolean', label: 'Enable Logging', defaultValue: true,
+        helperText: 'Log trash/restore/delete operations.',
+    },
+    trashbin_verboseLogging: {
+        type: 'boolean', label: 'Verbose Logging', defaultValue: false,
+        helperText: 'Log every operation immediately instead of batching, and include internal sql.js/node:sqlite diagnostics.',
+        showIf: v => v.trashbin_enableLogging,
+    },
+};
+
+exports.changelog = [
+    { version: 0.3, message: "Now requires hfs-shared. Operation logging (trash/restore/delete) is batched with an Enable/Verbose Logging switch instead of a hardcoded DEBUG constant." },
+];
 
 exports.init = async api => {
     const fs             = require('fs');
     const path           = require('path');
     const { spawnSync }  = require('child_process');
 
-    const log1 = (...a) => { if (DEBUG >= 1) api.log('[trashbin]', ...a); };
-    const log2 = (...a) => { if (DEBUG >= 2) api.log('[trashbin]', ...a); };
+    const shared = api.customApiCall('hfsShared')[0];
+    shared.requireVersion('^1.0.0');
+    const rawLogger = shared.createLogger(api, { tag: 'hfs-trashbin' });
+
+    // log1: per-event summaries (batched unless verbose). log2: internal
+    // sql.js/node:sqlite diagnostics, shown only when verbose, immediately.
+    const log1 = (...a) => {
+        if (!api.getConfig('trashbin_enableLogging')) return;
+        const msg = a.join(' ');
+        if (api.getConfig('trashbin_verboseLogging')) rawLogger.logNow(msg);
+        else rawLogger.log(msg);
+    };
+    const log2 = (...a) => { if (api.getConfig('trashbin_verboseLogging')) rawLogger.logNow(a.join(' ')); };
 
     const trashDir = path.join(api.storageDir, 'trash');
     fs.mkdirSync(trashDir, { recursive: true });
@@ -54,8 +79,8 @@ exports.init = async api => {
         dbClose  = ()           => ndb.close();
         log1('using node:sqlite');
     } catch (e) {
-        const log  = (...a) => { if (DEBUG >= 1) api.log('[trashbin:sqljs]', ...a); };
-        const logv = (...a) => { if (DEBUG >= 2) api.log('[trashbin:sqljs]', ...a); };
+        const log  = (...a) => log1('sqljs:', ...a);
+        const logv = (...a) => log2('sqljs:', ...a);
 
         log('WARNING: node:sqlite unavailable, reason:', e.message);
         log('         node version:', process.version, '| platform:', process.platform, '| arch:', process.arch);
@@ -77,7 +102,7 @@ exports.init = async api => {
 
             if (!fs.existsSync(installJs)) {
                 log('ERROR: install.js not found — plugin disabled.');
-                return { unload: () => {} };
+                return { unload: () => { rawLogger.unload() } };
             }
 
             // install.js always runs with DEBUG=1 (it always debugs internally)
@@ -91,7 +116,7 @@ exports.init = async api => {
 
             if (result.status !== 0) {
                 log('ERROR: install.js failed — plugin disabled. Place sqljs.tar.gz next to install.js and restart.');
-                return { unload: () => {} };
+                return { unload: () => { rawLogger.unload() } };
             }
             log('install.js succeeded');
         }
@@ -103,7 +128,7 @@ exports.init = async api => {
             logv('require succeeded, typeof initSqlJs:', typeof initSqlJs);
         } catch (re) {
             log('ERROR: require(sql-wasm.js) threw:', re.message, '\n', re.stack);
-            return { unload: () => {} };
+            return { unload: () => { rawLogger.unload() } };
         }
 
         logv('calling initSqlJs({ locateFile })');
@@ -119,7 +144,7 @@ exports.init = async api => {
             logv('initSqlJs resolved, typeof SQL.Database:', typeof SQL.Database);
         } catch (ie) {
             log('ERROR: initSqlJs() rejected:', ie.message, '\n', ie.stack);
-            return { unload: () => {} };
+            return { unload: () => { rawLogger.unload() } };
         }
 
         const dbPath = path.join(api.storageDir, 'trash.sqljs.db');
@@ -133,11 +158,11 @@ exports.init = async api => {
             logv('Database instance created');
         } catch (de) {
             log('ERROR: new SQL.Database() threw:', de.message, '\n', de.stack);
-            return { unload: () => {} };
+            return { unload: () => { rawLogger.unload() } };
         }
 
         try { sdb.run(CREATE); logv('CREATE TABLE IF NOT EXISTS succeeded'); }
-        catch (ce) { log('ERROR: CREATE TABLE failed:', ce.message); return { unload: () => {} }; }
+        catch (ce) { log('ERROR: CREATE TABLE failed:', ce.message); return { unload: () => { rawLogger.unload() } }; }
 
         const save = () => {
             const buf = sdb.export();
@@ -262,6 +287,6 @@ exports.init = async api => {
     return {
         frontend_js: 'main.js',
         customRest,
-        unload: () => { unsubDelete(); dbClose(); },
+        unload: () => { unsubDelete(); dbClose(); rawLogger.unload(); },
     };
 };
