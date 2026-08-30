@@ -1,9 +1,10 @@
-exports.version = 0.3;
+exports.version = 0.5;
 exports.description = "Trash Bin — moves deleted files to trash instead of permanently deleting them";
 exports.apiRequired = 13;
 exports.author = "feuerswut";
 exports.repo = "feuerswut/hfs-trashbin";
-exports.depend = [{ repo: "feuerswut/hfs-shared" }];
+
+const { awaitHfsShared } = require('./lib/dependency');
 
 exports.config = {
     trashbin_enableLogging: {
@@ -18,16 +19,52 @@ exports.config = {
 };
 
 exports.changelog = [
+    { version: 0.5, message: "The hfs-shared warning now gives the specific reason and reappears/clears more reliably (fallback poll added). Vendored guard moved to lib/dependency.js." },
+    { version: 0.4, message: "Hard exports.depend on hfs-shared replaced with a self-clearing config warning that hides the rest of the settings while hfs-shared is missing or outdated." },
     { version: 0.3, message: "Now requires hfs-shared. Operation logging (trash/restore/delete) is batched with an Enable/Verbose Logging switch instead of a hardcoded DEBUG constant." },
 ];
 
-exports.init = async api => {
+exports.init = api => {
+    let unsubDelete    = null;
+    let dbClose        = null;
+    let rawLogger      = null;
+    let customRestImpl = null;
+
+    awaitHfsShared(api, exports.config, '^1.0.0', shared => {
+        startRealPlugin(api, shared)
+            .then(impl => {
+                unsubDelete    = impl.unsubDelete;
+                dbClose        = impl.dbClose;
+                rawLogger      = impl.rawLogger;
+                customRestImpl = impl.customRest;
+            })
+            .catch(e => console.error('[hfs-trashbin] startRealPlugin failed:', e));
+    });
+
+    // hfs-shared isn't ready yet (or startRealPlugin never got past DB setup)
+    // -- calls land here until customRestImpl is assigned above.
+    function guarded(name) {
+        return (...args) => customRestImpl
+            ? customRestImpl[name](...args)
+            : { error: 'hfs-trashbin is not ready yet (waiting on hfs-shared).' };
+    }
+
+    return {
+        frontend_js: 'main.js',
+        customRest: {
+            trashbin_list: guarded('trashbin_list'),
+            trashbin_restore: guarded('trashbin_restore'),
+            trashbin_delete: guarded('trashbin_delete'),
+        },
+        unload: () => { unsubDelete?.(); dbClose?.(); rawLogger?.unload(); },
+    };
+};
+
+async function startRealPlugin(api, shared) {
     const fs             = require('fs');
     const path           = require('path');
     const { spawnSync }  = require('child_process');
 
-    const shared = api.customApiCall('hfsShared')[0];
-    shared.requireVersion('^1.0.0');
     const rawLogger = shared.createLogger(api, { tag: 'hfs-trashbin' });
 
     // log1: per-event summaries (batched unless verbose). log2: internal
@@ -102,7 +139,7 @@ exports.init = async api => {
 
             if (!fs.existsSync(installJs)) {
                 log('ERROR: install.js not found — plugin disabled.');
-                return { unload: () => { rawLogger.unload() } };
+                return { rawLogger };
             }
 
             // install.js always runs with DEBUG=1 (it always debugs internally)
@@ -116,7 +153,7 @@ exports.init = async api => {
 
             if (result.status !== 0) {
                 log('ERROR: install.js failed — plugin disabled. Place sqljs.tar.gz next to install.js and restart.');
-                return { unload: () => { rawLogger.unload() } };
+                return { rawLogger };
             }
             log('install.js succeeded');
         }
@@ -128,7 +165,7 @@ exports.init = async api => {
             logv('require succeeded, typeof initSqlJs:', typeof initSqlJs);
         } catch (re) {
             log('ERROR: require(sql-wasm.js) threw:', re.message, '\n', re.stack);
-            return { unload: () => { rawLogger.unload() } };
+            return { rawLogger };
         }
 
         logv('calling initSqlJs({ locateFile })');
@@ -144,7 +181,7 @@ exports.init = async api => {
             logv('initSqlJs resolved, typeof SQL.Database:', typeof SQL.Database);
         } catch (ie) {
             log('ERROR: initSqlJs() rejected:', ie.message, '\n', ie.stack);
-            return { unload: () => { rawLogger.unload() } };
+            return { rawLogger };
         }
 
         const dbPath = path.join(api.storageDir, 'trash.sqljs.db');
@@ -158,11 +195,11 @@ exports.init = async api => {
             logv('Database instance created');
         } catch (de) {
             log('ERROR: new SQL.Database() threw:', de.message, '\n', de.stack);
-            return { unload: () => { rawLogger.unload() } };
+            return { rawLogger };
         }
 
         try { sdb.run(CREATE); logv('CREATE TABLE IF NOT EXISTS succeeded'); }
-        catch (ce) { log('ERROR: CREATE TABLE failed:', ce.message); return { unload: () => { rawLogger.unload() } }; }
+        catch (ce) { log('ERROR: CREATE TABLE failed:', ce.message); return { rawLogger }; }
 
         const save = () => {
             const buf = sdb.export();
@@ -284,9 +321,5 @@ exports.init = async api => {
     };
 
     log1('initialized — trash dir:', trashDir);
-    return {
-        frontend_js: 'main.js',
-        customRest,
-        unload: () => { unsubDelete(); dbClose(); rawLogger.unload(); },
-    };
-};
+    return { unsubDelete, dbClose, rawLogger, customRest };
+}
